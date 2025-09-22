@@ -56,7 +56,8 @@
 				"width": 1080,
 				"height": 800,
 				"minHeight": 84,
-				"minWidth": 72
+				"minWidth": 72,
+				"additionalBrowserArgs": "--enable-media-stream --enable-features=VaapiVideoDecoder"
 			}
 		],
 		"security": {

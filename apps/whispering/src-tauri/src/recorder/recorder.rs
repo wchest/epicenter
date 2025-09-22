@@ -1,4 +1,5 @@
 use crate::recorder::wav_writer::WavWriter;
+use crate::recorder::vad::VadProcessorHandle;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream};
 use serde::Serialize;
@@ -7,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tracing::{debug, error, info};
+use tauri::{Manager, Emitter};
 
 /// Simple result type using String for errors
 pub type Result<T> = std::result::Result<T, String>;
@@ -30,6 +32,15 @@ enum RecorderCmd {
     Shutdown,
 }
 
+/// VAD state for voice activity detection
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum VadState {
+    Idle,
+    Listening,
+    SpeechDetected,
+    Processing,
+}
+
 /// Simplified recorder state
 pub struct RecorderState {
     cmd_tx: Option<mpsc::Sender<RecorderCmd>>,
@@ -39,6 +50,12 @@ pub struct RecorderState {
     sample_rate: u32,
     channels: u16,
     file_path: Option<PathBuf>,
+    // VAD-specific fields
+    vad_processor: Arc<VadProcessorHandle>,
+    vad_enabled: Arc<AtomicBool>,
+    vad_state: Arc<Mutex<VadState>>,
+    vad_output_folder: Option<PathBuf>,
+    app_handle: Option<tauri::AppHandle>,
 }
 
 impl RecorderState {
@@ -51,6 +68,11 @@ impl RecorderState {
             sample_rate: 0,
             channels: 0,
             file_path: None,
+            vad_processor: Arc::new(VadProcessorHandle::new()),
+            vad_enabled: Arc::new(AtomicBool::new(false)),
+            vad_state: Arc::new(Mutex::new(VadState::Idle)),
+            vad_output_folder: None,
+            app_handle: None,
         }
     }
 
@@ -293,6 +315,158 @@ impl RecorderState {
             None
         }
     }
+
+    /// Start VAD recording session
+    pub fn start_vad_recording(
+        &mut self,
+        device_name: String,
+        output_folder: PathBuf,
+        aggressiveness: u8,
+        audio_threshold: Option<f32>,
+        silence_timeout_ms: Option<u32>,
+        app_handle: tauri::AppHandle,
+    ) -> Result<()> {
+        // Clean up any existing session
+        self.stop_vad_recording()?;
+
+        // Store app handle and output folder for VAD
+        self.app_handle = Some(app_handle.clone());
+        self.vad_output_folder = Some(output_folder.clone());
+
+        // Find the device
+        let host = cpal::default_host();
+        let device = find_device(&host, &device_name)?;
+
+        // Get optimal config for voice
+        let config = get_optimal_config(&device, Some(16000))?; // 16kHz is optimal for VAD
+        let sample_format = config.sample_format();
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
+
+        // Initialize VAD processor with custom settings
+        self.vad_processor.init_with_settings(
+            sample_rate,
+            channels,
+            aggressiveness,
+            audio_threshold.unwrap_or(200.0),
+            silence_timeout_ms.unwrap_or(800)
+        )?;
+
+        // Create stream config
+        let stream_config = cpal::StreamConfig {
+            channels,
+            sample_rate: cpal::SampleRate(sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        // Create fresh recording flag
+        self.is_recording = Arc::new(AtomicBool::new(false));
+        let is_recording = self.is_recording.clone();
+
+        // Create command channel for worker thread
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+
+        // Clone for the worker thread
+        let vad_processor = self.vad_processor.clone();
+        let vad_enabled = self.vad_enabled.clone();
+        let vad_state_clone = self.vad_state.clone();
+        let output_folder_clone = output_folder;
+        let app_handle_clone = app_handle;
+
+        // Store sample rate and channels
+        self.sample_rate = sample_rate;
+        self.channels = channels;
+
+        // Create the worker thread that owns the stream
+        let worker = thread::spawn(move || {
+            // Build the stream IN this thread
+            let stream = match build_vad_input_stream(
+                &device,
+                &stream_config,
+                sample_format,
+                vad_processor,
+                vad_enabled.clone(),
+                vad_state_clone,
+                output_folder_clone,
+                app_handle_clone,
+                sample_rate,
+                channels,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Failed to build VAD stream: {}", e);
+                    return;
+                }
+            };
+
+            // Start the stream
+            if let Err(e) = stream.play() {
+                error!("Failed to start VAD stream: {}", e);
+                return;
+            }
+
+            info!("VAD audio stream started successfully");
+            vad_enabled.store(true, Ordering::Relaxed);
+
+            // Keep thread alive by waiting for commands
+            loop {
+                match cmd_rx.recv() {
+                    Ok(RecorderCmd::Stop(reply_tx)) => {
+                        vad_enabled.store(false, Ordering::Relaxed);
+                        info!("VAD recording stopped");
+                        let _ = reply_tx.send(());
+                        break;
+                    }
+                    Ok(RecorderCmd::Shutdown) | Err(_) => {
+                        info!("Shutting down VAD worker");
+                        vad_enabled.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Store everything
+        self.cmd_tx = Some(cmd_tx);
+        self.worker_handle = Some(worker);
+        self.vad_enabled.store(true, Ordering::Relaxed);
+        *self.vad_state.lock().unwrap() = VadState::Listening;
+
+        info!("VAD recording started: {} Hz, {} channels", sample_rate, channels);
+        Ok(())
+    }
+
+    /// Stop VAD recording
+    pub fn stop_vad_recording(&mut self) -> Result<()> {
+        // Send stop command to worker thread
+        if let Some(tx) = &self.cmd_tx {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            let _ = tx.send(RecorderCmd::Stop(reply_tx));
+            let _ = reply_rx.recv();
+        }
+
+        // Wait for worker thread to finish
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
+
+        // Reset VAD state
+        self.vad_enabled.store(false, Ordering::Relaxed);
+        *self.vad_state.lock().unwrap() = VadState::Idle;
+        self.vad_processor.reset()?;
+        self.vad_output_folder = None;
+        self.app_handle = None;
+        self.cmd_tx = None;
+
+        debug!("VAD recording stopped");
+        Ok(())
+    }
+
+    /// Get current VAD state
+    pub fn get_vad_state(&self) -> VadState {
+        *self.vad_state.lock().unwrap()
+    }
 }
 
 /// Find a recording device by name
@@ -468,8 +642,257 @@ fn build_input_stream(
     Ok(stream)
 }
 
+/// Build input stream for VAD processing
+fn build_vad_input_stream(
+    device: &Device,
+    config: &cpal::StreamConfig,
+    sample_format: SampleFormat,
+    vad_processor: Arc<VadProcessorHandle>,
+    vad_enabled: Arc<AtomicBool>,
+    vad_state: Arc<Mutex<VadState>>,
+    output_folder: PathBuf,
+    app_handle: tauri::AppHandle,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Stream> {
+    let err_fn = |err| error!("VAD audio stream error: {}", err);
+
+    // Create a unique ID generator
+    let recording_counter = Arc::new(Mutex::new(0u32));
+
+    let stream = match sample_format {
+        SampleFormat::F32 => {
+            let vad_processor = vad_processor.clone();
+            let vad_enabled = vad_enabled.clone();
+            let vad_state = vad_state.clone();
+            let output_folder = output_folder.clone();
+            let app_handle = app_handle.clone();
+            let recording_counter = recording_counter.clone();
+
+            device
+                .build_input_stream(
+                    config,
+                    move |data: &[f32], _: &_| {
+                        let vad_is_enabled = vad_enabled.load(Ordering::Relaxed);
+                        println!("🔧 RECORDER: Callback triggered, vad_enabled={}, samples={}", vad_is_enabled, data.len());
+                        if vad_is_enabled {
+                            // Process audio through VAD
+                            println!("🎤 RECORDER: Processing {} samples through VAD", data.len());
+                            match vad_processor.process_audio(data) {
+                                Ok(Some(speech_audio)) => {
+                                        println!("🎯 RECORDER: Received speech audio with {} samples!", speech_audio.len());
+                                    // Speech segment complete - save to file
+                                    *vad_state.lock().unwrap() = VadState::Processing;
+
+                                    let duration_seconds = speech_audio.len() as f32 / (sample_rate * channels as u32) as f32;
+                                    let audio_level = if !speech_audio.is_empty() {
+                                        speech_audio.iter().map(|&s| s.abs()).sum::<f32>() / speech_audio.len() as f32
+                                    } else {
+                                        0.0
+                                    };
+
+                                    println!("💾 SAVING SPEECH SEGMENT: {} samples, {:.2}s duration, avg_level: {:.6}",
+                                             speech_audio.len(), duration_seconds, audio_level);
+
+                                    // Generate unique filename
+                                    let timestamp = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis();
+                                    let mut counter = recording_counter.lock().unwrap();
+                                    *counter += 1;
+                                    let filename = format!("vad_{}_{}.wav", timestamp, counter);
+                                    let file_path = output_folder.join(&filename);
+
+                                    println!("📁 Writing to file: {:?}", file_path);
+
+                                    // Write WAV file
+                                    if let Ok(mut writer) = WavWriter::new(file_path.clone(), sample_rate, channels) {
+                                        if writer.write_samples_f32(&speech_audio).is_ok() {
+                                            if writer.finalize().is_ok() {
+                                                println!("✅ VAD recording saved successfully: {:?}", file_path);
+                                                info!("VAD recording saved: {:?}", file_path);
+
+                                                // Emit event to frontend
+                                                let _ = app_handle.emit("vad-speech-detected", AudioRecording {
+                                                    audio_data: Vec::new(),
+                                                    sample_rate,
+                                                    channels,
+                                                    duration_seconds,
+                                                    file_path: Some(file_path.to_string_lossy().to_string()),
+                                                });
+                                            } else {
+                                                println!("❌ Failed to finalize WAV file: {:?}", file_path);
+                                            }
+                                        } else {
+                                            println!("❌ Failed to write audio samples to WAV file: {:?}", file_path);
+                                        }
+                                    } else {
+                                        println!("❌ Failed to create WAV writer for: {:?}", file_path);
+                                    }
+
+                                    *vad_state.lock().unwrap() = VadState::Listening;
+                                },
+                                Ok(None) => {
+                                    // No speech segment yet - this is normal
+                                },
+                                Err(e) => {
+                                    println!("❌ RECORDER: VAD processing error: {}", e);
+                                }
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("Failed to build F32 VAD stream: {}", e))?
+        }
+        SampleFormat::I16 => {
+            let vad_processor = vad_processor.clone();
+            let vad_enabled = vad_enabled.clone();
+            let vad_state = vad_state.clone();
+            let output_folder = output_folder.clone();
+            let app_handle = app_handle.clone();
+            let recording_counter = recording_counter.clone();
+
+            device
+                .build_input_stream(
+                    config,
+                    move |data: &[i16], _: &_| {
+                        let vad_is_enabled = vad_enabled.load(Ordering::Relaxed);
+                        if vad_is_enabled {
+                            // Convert i16 to f32
+                            let f32_data: Vec<f32> = data.iter().map(|&s| s as f32 / 32767.0).collect();
+
+                            // Process audio through VAD
+                            match vad_processor.process_audio(&f32_data) {
+                                Ok(Some(speech_audio)) => {
+                                    println!("🎯 RECORDER I16: Received speech audio with {} samples!", speech_audio.len());
+                                    *vad_state.lock().unwrap() = VadState::Processing;
+
+                                    let duration_seconds = speech_audio.len() as f32 / (sample_rate * channels as u32) as f32;
+                                    let audio_level = if !speech_audio.is_empty() {
+                                        speech_audio.iter().map(|&s| s.abs()).sum::<f32>() / speech_audio.len() as f32
+                                    } else {
+                                        0.0
+                                    };
+
+                                    println!("💾 SAVING SPEECH SEGMENT I16: {} samples, {:.2}s duration, avg_level: {:.6}",
+                                             speech_audio.len(), duration_seconds, audio_level);
+
+                                    let timestamp = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis();
+                                    let mut counter = recording_counter.lock().unwrap();
+                                    *counter += 1;
+                                    let filename = format!("vad_{}_{}.wav", timestamp, counter);
+                                    let file_path = output_folder.join(&filename);
+
+                                    println!("📁 Writing to file: {:?}", file_path);
+
+                                    if let Ok(mut writer) = WavWriter::new(file_path.clone(), sample_rate, channels) {
+                                        if writer.write_samples_f32(&speech_audio).is_ok() {
+                                            if writer.finalize().is_ok() {
+                                                println!("✅ VAD recording saved successfully: {:?}", file_path);
+                                                info!("VAD recording saved: {:?}", file_path);
+
+                                                let _ = app_handle.emit("vad-speech-detected", AudioRecording {
+                                                    audio_data: Vec::new(),
+                                                    sample_rate,
+                                                    channels,
+                                                    duration_seconds,
+                                                    file_path: Some(file_path.to_string_lossy().to_string()),
+                                                });
+                                            } else {
+                                                println!("❌ Failed to finalize WAV file: {:?}", file_path);
+                                            }
+                                        } else {
+                                            println!("❌ Failed to write audio samples to WAV file: {:?}", file_path);
+                                        }
+                                    } else {
+                                        println!("❌ Failed to create WAV writer for: {:?}", file_path);
+                                    }
+
+                                    *vad_state.lock().unwrap() = VadState::Listening;
+                                },
+                                Ok(None) => {
+                                    // No speech segment yet - this is normal
+                                },
+                                Err(e) => {
+                                    println!("❌ RECORDER I16: VAD processing error: {}", e);
+                                }
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("Failed to build I16 VAD stream: {}", e))?
+        }
+        SampleFormat::U16 => {
+            let vad_processor = vad_processor.clone();
+            let vad_enabled = vad_enabled.clone();
+            let vad_state = vad_state.clone();
+            let output_folder = output_folder.clone();
+            let app_handle = app_handle.clone();
+            let recording_counter = recording_counter.clone();
+
+            device
+                .build_input_stream(
+                    config,
+                    move |data: &[u16], _: &_| {
+                        if vad_enabled.load(Ordering::Relaxed) {
+                            // Convert u16 to f32
+                            let f32_data: Vec<f32> = data.iter().map(|&s| (s as f32 - 32768.0) / 32767.0).collect();
+
+                            // Process audio through VAD
+                            if let Ok(Some(speech_audio)) = vad_processor.process_audio(&f32_data) {
+                                *vad_state.lock().unwrap() = VadState::Processing;
+
+                                let timestamp = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis();
+                                let mut counter = recording_counter.lock().unwrap();
+                                *counter += 1;
+                                let filename = format!("vad_{}_{}.wav", timestamp, counter);
+                                let file_path = output_folder.join(&filename);
+
+                                if let Ok(mut writer) = WavWriter::new(file_path.clone(), sample_rate, channels) {
+                                    if writer.write_samples_f32(&speech_audio).is_ok() {
+                                        if writer.finalize().is_ok() {
+                                            info!("VAD recording saved: {:?}", file_path);
+
+                                            let _ = app_handle.emit("vad-speech-detected", AudioRecording {
+                                                audio_data: Vec::new(),
+                                                sample_rate,
+                                                channels,
+                                                duration_seconds: speech_audio.len() as f32 / (sample_rate * channels as u32) as f32,
+                                                file_path: Some(file_path.to_string_lossy().to_string()),
+                                            });
+                                        }
+                                    }
+                                }
+
+                                *vad_state.lock().unwrap() = VadState::Listening;
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("Failed to build U16 VAD stream: {}", e))?
+        }
+        _ => return Err(format!("Unsupported sample format for VAD: {:?}", sample_format)),
+    };
+
+    Ok(stream)
+}
+
 impl Drop for RecorderState {
     fn drop(&mut self) {
         let _ = self.close_session();
+        let _ = self.stop_vad_recording();
     }
 }

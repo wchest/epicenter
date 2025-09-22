@@ -178,13 +178,28 @@ const startVadRecording = defineMutation({
 						// VAD doesn't track duration by default
 					});
 
-					await processRecordingPipeline({
-						blob,
-						toastId,
-						completionTitle: '✨ Voice activated capture complete!',
-						completionDescription:
-							'Voice activated capture complete! Ready for another take',
-					});
+					// Add timeout and error handling to prevent UI hangs
+					try {
+						// 30 second timeout for transcription
+						await Promise.race([
+							processRecordingPipeline({
+								blob,
+								toastId,
+								completionTitle: '✨ Voice activated capture complete!',
+								completionDescription: 'Voice activated capture complete! Ready for another take',
+							}),
+							new Promise((_, reject) =>
+								setTimeout(() => reject(new Error('Transcription timeout')), 30000)
+							)
+						]);
+					} catch (error) {
+						console.error('VAD transcription failed:', error);
+						notify.error.execute({
+							id: toastId,
+							title: '❌ Transcription failed',
+							description: error instanceof Error ? error.message : 'Unknown error occurred',
+						});
+					}
 				},
 			});
 		if (startActiveListeningError) {

@@ -152,6 +152,25 @@ export const settingsSchema = z.object({
 		.enum(['16000', '44100', '48000'])
 		.default('16000'),
 
+	// VAD (Voice Activity Detection) settings
+	'recording.vad.aggressiveness': z
+		.number()
+		.int()
+		.min(0)
+		.max(3)
+		.default(1), // 0=quality, 1=low_bitrate, 2=aggressive, 3=very_aggressive (reduced from 2)
+	'recording.vad.audioThreshold': z
+		.number()
+		.min(0)
+		.max(2000)
+		.default(200), // Minimum audio level to consider as potential speech (reduced from 500)
+	'recording.vad.silenceTimeoutMs': z
+		.number()
+		.int()
+		.min(500)
+		.max(5000)
+		.default(800), // Milliseconds of silence before ending speech detection (reduced from 1000)
+
 	// FFmpeg recording settings - split into three customizable parts
 	'recording.ffmpeg.globalOptions': z
 		.string()

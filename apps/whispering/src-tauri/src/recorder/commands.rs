@@ -1,4 +1,4 @@
-use crate::recorder::recorder::{AudioRecording, RecorderState, Result};
+use crate::recorder::recorder::{AudioRecording, RecorderState, Result, VadState};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
@@ -111,4 +111,71 @@ pub async fn get_current_recording_id(state: State<'_, AppData>) -> Result<Optio
         .lock()
         .map_err(|e| format!("Failed to lock recorder: {}", e))?;
     Ok(recorder.get_current_recording_id())
+}
+
+// VAD-specific commands
+
+#[tauri::command]
+pub async fn start_vad_recording(
+    device_identifier: String,
+    output_folder: String,
+    aggressiveness: u8,
+    audio_threshold: Option<f32>,
+    silence_timeout_ms: Option<u32>,
+    state: State<'_, AppData>,
+    app_handle: tauri::AppHandle,
+) -> Result<()> {
+    println!("🚀 START_VAD_RECORDING COMMAND CALLED: device={}, folder={}, aggressiveness={}, audio_threshold={:?}, silence_timeout_ms={:?}",
+             device_identifier, output_folder, aggressiveness, audio_threshold, silence_timeout_ms);
+    info!(
+        "Starting VAD recording: device={}, folder={}, aggressiveness={}, audio_threshold={:?}, silence_timeout_ms={:?}",
+        device_identifier, output_folder, aggressiveness, audio_threshold, silence_timeout_ms
+    );
+
+    let output_folder = PathBuf::from(output_folder);
+
+    // Create the directory if it doesn't exist
+    if !output_folder.exists() {
+        std::fs::create_dir_all(&output_folder)
+            .map_err(|e| format!("Failed to create output folder: {}", e))?;
+    }
+
+    // Validate it's a directory (not a file)
+    if !output_folder.is_dir() {
+        return Err(format!("Output path is not a directory: {:?}", output_folder));
+    }
+
+    let mut recorder = state
+        .recorder
+        .lock()
+        .map_err(|e| format!("Failed to lock recorder: {}", e))?;
+
+    recorder.start_vad_recording(device_identifier, output_folder, aggressiveness, audio_threshold, silence_timeout_ms, app_handle)
+}
+
+#[tauri::command]
+pub async fn stop_vad_recording(state: State<'_, AppData>) -> Result<()> {
+    info!("Stopping VAD recording");
+    let mut recorder = state
+        .recorder
+        .lock()
+        .map_err(|e| format!("Failed to lock recorder: {}", e))?;
+    recorder.stop_vad_recording()
+}
+
+#[tauri::command]
+pub async fn get_vad_state(state: State<'_, AppData>) -> Result<VadState> {
+    debug!("Getting VAD state");
+    let recorder = state
+        .recorder
+        .lock()
+        .map_err(|e| format!("Failed to lock recorder: {}", e))?;
+    Ok(recorder.get_vad_state())
+}
+
+#[tauri::command]
+pub async fn read_vad_audio_file(file_path: String) -> Result<Vec<u8>> {
+    debug!("Reading VAD audio file: {}", file_path);
+    std::fs::read(&file_path)
+        .map_err(|e| format!("Failed to read VAD audio file '{}': {}", file_path, e))
 }

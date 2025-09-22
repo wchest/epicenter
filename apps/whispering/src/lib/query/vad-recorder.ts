@@ -3,8 +3,9 @@ import { fromTaggedErr } from '$lib/result';
 import * as services from '$lib/services';
 import { enumerateDevices } from '$lib/services/device-stream';
 import { settings } from '$lib/stores/settings.svelte';
-import { Ok } from 'wellcrafted/result';
+import { Ok, tryAsync } from 'wellcrafted/result';
 import { defineMutation, defineQuery, queryClient } from './_client';
+import { invoke } from '@tauri-apps/api/core';
 
 const vadRecorderKeys = {
 	all: ['vadRecorder'] as const,
@@ -23,19 +24,32 @@ export const vadRecorder = {
 			return Ok(vadState);
 		},
 		initialData: 'IDLE' as VadState,
+		refetchInterval: 200, // Poll to catch state changes
 	}),
 
 	enumerateDevices: defineQuery({
 		queryKey: vadRecorderKeys.devices,
 		resultQueryFn: async () => {
-			const { data, error } = await enumerateDevices();
-			if (error) {
-				return fromTaggedErr(error, {
-					title: '❌ Failed to enumerate devices',
-					action: { type: 'more-details', error },
-				});
+			// Use native VAD enumeration if in Tauri, otherwise use web APIs
+			if (window.__TAURI_INTERNALS__) {
+				const { data, error } = await services.vad.enumerateDevices();
+				if (error) {
+					return fromTaggedErr(error, {
+						title: '❌ Failed to enumerate devices',
+						action: { type: 'more-details', error },
+					});
+				}
+				return Ok(data);
+			} else {
+				const { data, error } = await enumerateDevices();
+				if (error) {
+					return fromTaggedErr(error, {
+						title: '❌ Failed to enumerate devices',
+						action: { type: 'more-details', error },
+					});
+				}
+				return Ok(data);
 			}
-			return Ok(data);
 		},
 	}),
 

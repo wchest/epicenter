@@ -58,6 +58,8 @@
     "updater:default",
     "aptabase:allow-track-event",
     "macos-permissions:default",
+    "macos-permissions:allow-request-microphone-permission",
+    "macos-permissions:allow-check-microphone-permission",
     "shell:default",
     {
       "identifier": "shell:allow-execute",

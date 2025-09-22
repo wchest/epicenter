@@ -231,6 +231,85 @@
 					settings.updateKey('recording.navigator.deviceId', selected)
 			}
 		/>
+
+		<!-- VAD Sensitivity Settings -->
+		<div class="space-y-4 rounded-lg border p-4">
+			<div class="flex justify-between items-center">
+				<div>
+					<h3 class="text-sm font-medium">VAD Sensitivity</h3>
+					<p class="text-xs text-muted-foreground mt-1">
+						Adjust how sensitive voice detection is to background noise and silence
+					</p>
+				</div>
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={() => {
+						// Reset VAD settings to new defaults
+						settings.updateKey('recording.vad.aggressiveness', 1);
+						settings.updateKey('recording.vad.audioThreshold', 200);
+						settings.updateKey('recording.vad.silenceTimeoutMs', 800);
+					}}
+				>
+					Reset to Defaults
+				</Button>
+			</div>
+
+			<LabeledSelect
+				id="vad-aggressiveness"
+				label="Detection Mode"
+				items={[
+					{ value: 0, label: 'Quality (most sensitive)' },
+					{ value: 1, label: 'Low Bitrate (balanced)' },
+					{ value: 2, label: 'Aggressive (less sensitive)' },
+					{ value: 3, label: 'Very Aggressive (least sensitive)' }
+				]}
+				bind:selected={
+					() => settings.value['recording.vad.aggressiveness'],
+					(selected) => settings.updateKey('recording.vad.aggressiveness', selected)
+				}
+				placeholder="Select detection mode"
+				description="Higher values reduce false positives but may miss quiet speech"
+			/>
+
+			<div class="space-y-2">
+				<label for="audio-threshold" class="text-sm font-medium">
+					Audio Threshold: {settings.value['recording.vad.audioThreshold']}
+				</label>
+				<input
+					id="audio-threshold"
+					type="range"
+					min="50"
+					max="1000"
+					step="50"
+					bind:value={settings.value['recording.vad.audioThreshold']}
+					oninput={(e) => settings.updateKey('recording.vad.audioThreshold', Number(e.target.value))}
+					class="w-full accent-primary"
+				/>
+				<p class="text-xs text-muted-foreground">
+					Minimum audio level to consider as speech. Lower = more sensitive to quiet sounds.
+				</p>
+			</div>
+
+			<div class="space-y-2">
+				<label for="silence-timeout" class="text-sm font-medium">
+					Silence Timeout: {settings.value['recording.vad.silenceTimeoutMs']}ms
+				</label>
+				<input
+					id="silence-timeout"
+					type="range"
+					min="500"
+					max="3000"
+					step="100"
+					bind:value={settings.value['recording.vad.silenceTimeoutMs']}
+					oninput={(e) => settings.updateKey('recording.vad.silenceTimeoutMs', Number(e.target.value))}
+					class="w-full accent-primary"
+				/>
+				<p class="text-xs text-muted-foreground">
+					How long to wait after speech stops before ending recording. Shorter = more responsive.
+				</p>
+			</div>
+		</div>
 	{/if}
 
 	{#if settings.value['recording.mode'] === 'manual' || settings.value['recording.mode'] === 'vad'}

@@ -19,6 +19,12 @@ type DeviceStreamServiceError = ReturnType<typeof DeviceStreamServiceError>;
  * Uses Permissions API if available, otherwise returns false to trigger proper permission flow.
  */
 async function hasExistingAudioPermission(): Promise<boolean> {
+	// In Tauri apps, skip the Permissions API check as it doesn't work reliably
+	// The __TAURI_INTERNALS__ global indicates we're in a Tauri webview
+	if (window.__TAURI_INTERNALS__) {
+		return false;
+	}
+
 	// Try the Permissions API first (not all browsers support it)
 	if ('permissions' in navigator) {
 		const { data: permissionStatus, error } = await tryAsync({
@@ -28,14 +34,12 @@ async function hasExistingAudioPermission(): Promise<boolean> {
 				});
 				return permissionStatus;
 			},
-			catch: (error) =>
-				DeviceStreamServiceErr({
-					message:
-						'We need permission to see your microphones. Check your browser settings and try again.',
-					cause: error,
-				}),
+			catch: (error) => {
+				// Don't return an error here, just fall through to return false
+				return null;
+			},
 		});
-		if (!error) return permissionStatus.state === 'granted';
+		if (!error && permissionStatus) return permissionStatus.state === 'granted';
 	}
 
 	// Return false to let the actual getUserMedia call handle permissions
