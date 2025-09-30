@@ -7,7 +7,7 @@ import { defineMutation, defineQuery, queryClient } from './_client';
 
 // Dynamically select VAD service based on settings
 function vadService() {
-	return settings.value['recording.vad.useNative'] ? services.nativeVad : services.vad;
+	return settings.value['recording.vad.useNative'] ? services.nativeVad : services.webVad;
 }
 
 const vadRecorderKeys = {

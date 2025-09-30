@@ -20,6 +20,19 @@ import * as transcriptions from './transcription';
 import { TrayIconServiceLive } from './tray';
 import { VadServiceLive } from './vad-recorder';
 import { NativeVadServiceLive } from './native-vad';
+import type { VadService } from './vad-recorder';
+
+/**
+ * Get the appropriate VAD service based on settings.
+ * Returns native VAD if enabled in settings, otherwise returns web VAD.
+ */
+export function getVadService(): VadService {
+	// Import settings dynamically to avoid circular dependencies
+	const { settings } = require('$lib/stores/settings.svelte');
+	const useNative = settings.value['recording.vad.useNative'];
+
+	return useNative ? NativeVadServiceLive : VadServiceLive;
+}
 
 /**
  * Unified services object providing consistent access to all services.
@@ -45,6 +58,7 @@ export {
 	OsServiceLive as os,
 	PlaySoundServiceLive as sound,
 	transcriptions,
-	VadServiceLive as vad,
+	// Export both VAD services individually for direct access if needed
+	VadServiceLive as webVad,
 	NativeVadServiceLive as nativeVad,
 };

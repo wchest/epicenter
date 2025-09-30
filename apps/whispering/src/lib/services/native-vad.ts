@@ -52,8 +52,6 @@ export function createNativeVadService() {
 			// Set to LISTENING immediately, like web VAD does
 			vadState = 'LISTENING';
 
-			// Log the starting parameters (sensitivity will be logged later after import)
-
 			// Set up event listener BEFORE starting VAD
 			const { error: listenError } = await tryAsync({
 				try: async () => {
@@ -99,13 +97,18 @@ export function createNativeVadService() {
 			const { settings } = await import('$lib/stores/settings.svelte');
 			const sensitivity = settings.value['recording.vad.sensitivity'] || 0.3;
 
+			// Get recordings folder
+			const { getDefaultRecordingsFolder } = await import('$lib/services/recorder/utils');
+			const outputFolder = await getDefaultRecordingsFolder();
 
 			// Start VAD recording with user-configured sensitivity
 			const { error: startError } = await tryAsync({
-				try: () => invoke('start_vad_recording', {
+				try: () => invoke('init_vad_recording_session', {
 					deviceIdentifier: deviceId || 'default',
+					outputFolder,
 					threshold: sensitivity,
 					silenceTimeoutMs: 800,
+					sampleRate: 16000, // Optimal for VAD
 				}),
 				catch: (error) =>
 					VadRecorderServiceErr({
@@ -143,7 +146,7 @@ export function createNativeVadService() {
 
 			// Stop VAD recording
 			const { error: stopError } = await tryAsync({
-				try: () => invoke('stop_vad_recording'),
+				try: () => invoke('stop_vad_recording_session'),
 				catch: (error) =>
 					VadRecorderServiceErr({
 						message: 'Failed to stop native VAD recording',

@@ -6,7 +6,8 @@ pub mod recorder;
 use recorder::commands::{
     cancel_recording, close_recording_session, enumerate_recording_devices,
     get_current_recording_id, init_recording_session, start_recording, stop_recording,
-    start_vad_recording, stop_vad_recording, get_vad_state, AppData,
+    init_vad_recording_session, stop_vad_recording_session,
+    AppData,
 };
 
 pub mod transcription;
@@ -79,10 +80,9 @@ pub async fn run() {
         start_recording,
         stop_recording,
         cancel_recording,
-        // VAD commands
-        start_vad_recording,
-        stop_vad_recording,
-        get_vad_state,
+        // Native VAD commands
+        init_vad_recording_session,
+        stop_vad_recording_session,
         transcribe_audio_whisper,
         transcribe_audio_parakeet,
         send_sigint,
