@@ -335,8 +335,19 @@ fn get_optimal_config(
         return Err("No supported input configurations".to_string());
     }
 
-    // Try to find mono config with target sample rate
-    for config in &configs {
+    // Filter for supported sample formats only
+    let supported_formats = [SampleFormat::F32, SampleFormat::I16, SampleFormat::U16];
+    let compatible_configs: Vec<_> = configs
+        .iter()
+        .filter(|config| supported_formats.contains(&config.sample_format()))
+        .collect();
+
+    if compatible_configs.is_empty() {
+        return Err("No configurations with supported sample formats (F32, I16, U16)".to_string());
+    }
+
+    // Try to find mono config with target sample rate and supported format
+    for config in &compatible_configs {
         if config.channels() == 1 {
             let min_rate = config.min_sample_rate().0;
             let max_rate = config.max_sample_rate().0;
@@ -347,7 +358,7 @@ fn get_optimal_config(
     }
 
     // Try stereo with target sample rate if mono not available
-    for config in &configs {
+    for config in &compatible_configs {
         let min_rate = config.min_sample_rate().0;
         let max_rate = config.max_sample_rate().0;
         if min_rate <= target_sample_rate && max_rate >= target_sample_rate {
@@ -359,7 +370,7 @@ fn get_optimal_config(
     let mut best_config = None;
     let mut best_diff = u32::MAX;
 
-    for config in &configs {
+    for config in &compatible_configs {
         // Prefer mono
         if config.channels() == 1 {
             let min_rate = config.min_sample_rate().0;
@@ -382,10 +393,20 @@ fn get_optimal_config(
         }
     }
 
-    // Return best config or fall back to default
-    best_config
-        .or_else(|| device.default_input_config().ok())
-        .ok_or_else(|| "Failed to find suitable audio configuration".to_string())
+    // If still no best config, take any compatible config
+    if best_config.is_none() && !compatible_configs.is_empty() {
+        let config = compatible_configs[0];
+        let min_rate = config.min_sample_rate().0;
+        let max_rate = config.max_sample_rate().0;
+        let rate = if min_rate <= target_sample_rate && max_rate >= target_sample_rate {
+            target_sample_rate
+        } else {
+            min_rate // Use minimum rate as fallback
+        };
+        best_config = Some(config.with_sample_rate(cpal::SampleRate(rate)));
+    }
+
+    best_config.ok_or_else(|| "Failed to find suitable audio configuration".to_string())
 }
 
 /// Build input stream for any supported sample format
